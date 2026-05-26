@@ -26,7 +26,7 @@ MAX_FONT_SIZE = 72
 
 # ===== LaTeX 编译配置 =====
 # 图片分辨率（DPI）- 提高这个值可以增加清晰度
-IMAGE_DPI = 4800  # 从 300 提高到 600
+IMAGE_DPI = 600  # 从 300 提高到 600
 
 # 图片边距（像素）
 IMAGE_PADDING = 20
@@ -39,6 +39,9 @@ ENABLE_CHINESE_SUPPORT = True
 
 # 中文字体（需要系统中已安装）
 CHINESE_FONT = "SimSun"  # 宋体，也可以改为 "Microsoft YaHei" 等
+
+# LaTeX 编译次数（单公式 1 次足够，复杂文档可能需要 2 次）
+COMPILE_TIMES = 1
 
 # ===== 图片质量配置 =====
 # 抗锯齿级别 (1-16，越高越清晰但处理时间越长)

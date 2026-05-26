@@ -1,0 +1,5 @@
+keyboard
+pyperclip
+pillow
+pymupdf
+pywin32
