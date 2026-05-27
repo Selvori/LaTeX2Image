@@ -5,7 +5,7 @@ import pyperclip
 import tempfile
 import os
 import subprocess
-from PIL import Image
+from PIL import Image, ImageOps
 import win32clipboard
 import io
 import re
@@ -22,14 +22,16 @@ from latex_config import (
 # 添加全局变量防止重复触发
 is_processing = False
 
-def send_hotkey(hotkey_str: str, hold: float = 0.05, after: float = 0.3):
+def send_hotkey(hotkey_str: str, hold: float = 0.15, after: float = 0.3):
     """解析热键字符串（如 'ctrl+a'）并发送按键"""
     keys = hotkey_str.split('+')
     for k in keys:
         keyboard.press(k)
+        time.sleep(0.02)
     time.sleep(hold)
     for k in reversed(keys):
         keyboard.release(k)
+        time.sleep(0.02)
     time.sleep(after)
 
 def copy_png_bytes_to_clipboard(png_bytes: bytes):
@@ -50,36 +52,28 @@ def copy_png_bytes_to_clipboard(png_bytes: bytes):
 
 def get_input_text() -> str:
     """
-    获取输入框中的文本，使用更可靠的方法
+    获取输入框中的文本（全选+剪切，不依赖 ctrl+c 复制）
     """
+    # 先释放所有可能的修饰键，避免 hotkey 回调中残留的 ctrl/shift 干扰
+    keyboard.release('ctrl')
+    keyboard.release('shift')
+    keyboard.release('alt')
+    time.sleep(0.05)
+
     # 备份原剪贴板
     old_clip = pyperclip.paste()
 
-    # 方法1: 尝试使用复制操作
-    pyperclip.copy("")
-    time.sleep(0.1)
-
-    # 发送复制命令
-    send_hotkey('ctrl+c', after=0.3)
-
-    new_clip = pyperclip.paste()
-
-    # 如果复制成功，返回内容
-    if new_clip and new_clip != old_clip:
-        pyperclip.copy(old_clip)
-        return new_clip
-
-    # 方法2: 如果复制失败，尝试全选+剪切
-    print("复制失败，尝试剪切方式...")
+    # 清空剪贴板，准备接收新内容
     pyperclip.copy("")
     time.sleep(0.1)
 
     # 全选
     send_hotkey(SELECT_ALL_HOTKEY, after=0.2)
 
-    # 剪切
+    # 剪切（将文本从输入框移到剪贴板）
     send_hotkey(CUT_HOTKEY, after=0.3)
 
+    # 获取剪贴板内容
     new_clip = pyperclip.paste()
 
     # 恢复原剪贴板
@@ -126,7 +120,7 @@ def latex_to_image(latex_code: str, font_size: int = None) -> bytes:
         if USE_STANDALONE_CLASS:
             document_class = "standalone"
             # 使用 varwidth 选项使宽度自适应
-            document_options = f"preview,varwidth,{font_size}pt"
+            document_options = f"varwidth,{font_size}pt"
         else:
             document_class = "article"
             document_options = f"{font_size}pt"
@@ -189,16 +183,30 @@ def latex_to_image(latex_code: str, font_size: int = None) -> bytes:
             try:
                 page = pdf_document[0]
                 zoom = IMAGE_DPI / 72  # 72是PDF的标准DPI
-
-                # 创建高质量pixmap
                 matrix = fitz.Matrix(zoom, zoom)
+
+                # 扩展 MediaBox 确保内容不被页面裁剪
+                # standalone 生成的 PDF 中 \frac 的分母可能超出 MediaBox 范围
+                mb = page.mediabox
+                PAD = 30  # pt，足够容纳任何溢出的文本/分数线
+                page.set_mediabox(fitz.Rect(mb.x0 - PAD, mb.y0 - PAD,
+                                            mb.x1 + PAD, mb.y1 + PAD))
+
+                # 渲染页面
                 pix = page.get_pixmap(matrix=matrix, alpha=False)
-                img_data = pix.tobytes("png")
+                rendered = Image.open(io.BytesIO(pix.tobytes("png")))
+
+                # 用像素级扫描裁剪到实际内容边界
+                inverted = ImageOps.invert(rendered)
+                bbox = inverted.getbbox()
+                if bbox:
+                    image = rendered.crop(bbox)
+                else:
+                    image = rendered
             finally:
                 pdf_document.close()
 
             # 使用PIL处理图片，添加边距
-            image = Image.open(io.BytesIO(img_data))
 
             # 创建带边距的新图片
             new_width = image.width + 2 * IMAGE_PADDING
