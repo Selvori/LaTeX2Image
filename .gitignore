@@ -1,0 +1,13 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Local virtual environments
+venv/
+.venv/
+
+# Local secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+.claude/settings.local.json

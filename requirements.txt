@@ -1,5 +1,5 @@
-keyboard
-pyperclip
-pillow
-pymupdf
-pywin32
+keyboard==0.13.5
+pyperclip==1.11.0
+pillow==12.2.0
+pymupdf==1.27.2.3
+pywin32==311

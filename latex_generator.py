@@ -1,317 +1,91 @@
-# latex_generator_fixed.py
-import keyboard
-import time
-import pyperclip
-import tempfile
-import os
-import subprocess
-from PIL import Image, ImageOps
-import win32clipboard
-import io
-import re
+"""Global-hotkey entry point for LaTeX2Image."""
 
-# 导入配置
+import threading
+
+import keyboard
+
 from latex_config import (
-    HOTKEY, SELECT_ALL_HOTKEY, CUT_HOTKEY, PASTE_HOTKEY,
-    DEFAULT_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE,
-    IMAGE_DPI, IMAGE_PADDING, USE_STANDALONE_CLASS,
-    ENABLE_CHINESE_SUPPORT, CHINESE_FONT,
-    ANTIALIASING, USE_MATH_FONTS, COMPILE_TIMES
+    ANTIALIASING,
+    DEFAULT_FONT_SIZE,
+    ENABLE_CHINESE_SUPPORT,
+    HOTKEY,
+    IMAGE_DPI,
+)
+from latex_renderer import latex_to_image
+from windows_input import (
+    InputStateChangedError,
+    copy_png_bytes_to_clipboard,
+    get_foreground_window,
+    read_current_input_text,
+    replace_current_input_with_image,
 )
 
-# 添加全局变量防止重复触发
-is_processing = False
 
-def send_hotkey(hotkey_str: str, hold: float = 0.15, after: float = 0.3):
-    """解析热键字符串（如 'ctrl+a'）并发送按键"""
-    keys = hotkey_str.split('+')
-    for k in keys:
-        keyboard.press(k)
-        time.sleep(0.02)
-    time.sleep(hold)
-    for k in reversed(keys):
-        keyboard.release(k)
-        time.sleep(0.02)
-    time.sleep(after)
+processing_lock = threading.Lock()
 
-def copy_png_bytes_to_clipboard(png_bytes: bytes):
-    """复制 PNG 图片到剪贴板"""
-    image = Image.open(io.BytesIO(png_bytes))
-    # 转换成 BMP 字节流（去掉 BMP 文件头的前 14 个字节）
-    with io.BytesIO() as output:
-        image.convert("RGB").save(output, "BMP")
-        bmp_data = output.getvalue()[14:]
 
-    # 打开剪贴板并写入 DIB 格式（必须确保 CloseClipboard 始终执行）
-    win32clipboard.OpenClipboard()
-    try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp_data)
-    finally:
-        win32clipboard.CloseClipboard()
-
-def get_input_text() -> str:
-    """
-    获取输入框中的文本（全选+剪切，不依赖 ctrl+c 复制）
-    """
-    # 先释放所有可能的修饰键，避免 hotkey 回调中残留的 ctrl/shift 干扰
-    keyboard.release('ctrl')
-    keyboard.release('shift')
-    keyboard.release('alt')
-    time.sleep(0.05)
-
-    # 备份原剪贴板
-    old_clip = pyperclip.paste()
-
-    # 清空剪贴板，准备接收新内容
-    pyperclip.copy("")
-    time.sleep(0.1)
-
-    # 全选
-    send_hotkey(SELECT_ALL_HOTKEY, after=0.2)
-
-    # 剪切（将文本从输入框移到剪贴板）
-    send_hotkey(CUT_HOTKEY, after=0.3)
-
-    # 获取剪贴板内容
-    new_clip = pyperclip.paste()
-
-    # 恢复原剪贴板
-    pyperclip.copy(old_clip)
-
-    return new_clip
-
-def estimate_font_size(latex_code: str) -> int:
-    """
-    根据 LaTeX 代码长度估算合适的字体大小
-    """
-    # 移除 LaTeX 命令，只计算实际字符
-    clean_text = re.sub(r'\\[a-zA-Z]+\{.*?\}', '', latex_code)
-    clean_text = re.sub(r'\\[a-zA-Z]+', '', clean_text)
-    clean_text = re.sub(r'[^\w一-鿿]', '', clean_text)  # 保留中文字符和单词字符
-
-    length = len(clean_text)
-
-    # 根据长度调整字体大小
-    if length <= 5:
-        return min(MAX_FONT_SIZE, DEFAULT_FONT_SIZE + 6)
-    elif length <= 10:
-        return DEFAULT_FONT_SIZE
-    elif length <= 20:
-        return max(MIN_FONT_SIZE, DEFAULT_FONT_SIZE - 2)
-    else:
-        return max(MIN_FONT_SIZE, DEFAULT_FONT_SIZE - 4)
-
-def contains_chinese(text):
-    """检查文本是否包含中文字符"""
-    return re.search(r'[一-鿿]', text) is not None
-
-def latex_to_image(latex_code: str, font_size: int = None) -> bytes:
-    """
-    将 LaTeX 代码编译为图片
-    """
-    if font_size is None:
-        font_size = estimate_font_size(latex_code)
-
-    print(f"使用字体大小: {font_size}pt")
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 选择文档类
-        if USE_STANDALONE_CLASS:
-            document_class = "standalone"
-            # 使用 varwidth 选项使宽度自适应
-            document_options = f"varwidth,{font_size}pt"
-        else:
-            document_class = "article"
-            document_options = f"{font_size}pt"
-
-        # 构建 LaTeX 头部
-        latex_header = f"""\\documentclass[{document_options}]{{{document_class}}}
-\\usepackage{{amsmath}}
-\\usepackage{{amssymb}}
-\\usepackage{{xcolor}}"""
-
-        # 添加数学字体支持
-        if USE_MATH_FONTS:
-            latex_header += """
-\\usepackage{bm}  % 粗体数学符号
-\\usepackage{lmodern}  % 现代字体，更清晰"""
-            print("使用高质量数学字体")
-
-        # 添加中文支持（如果启用且文本包含中文）
-        if ENABLE_CHINESE_SUPPORT and contains_chinese(latex_code):
-            latex_header += f"""
-\\usepackage{{ctex}}
-\\setCJKmainfont{{{CHINESE_FONT}}}"""
-            print("启用中文支持")
-
-        # LaTeX 内容
-        latex_content = f"""{latex_header}
-\\begin{{document}}
-\\[ {latex_code} \\]
-\\end{{document}}"""
-
-        tex_file = os.path.join(tmpdir, "formula.tex")
-        with open(tex_file, "w", encoding="utf-8") as f:
-            f.write(latex_content)
-
-        try:
-            # 选择编译器
-            compiler = "pdflatex"
-            if ENABLE_CHINESE_SUPPORT and contains_chinese(latex_code):
-                compiler = "xelatex"  # xelatex 对中文支持更好
-
-            # 编译 LaTeX 到 PDF
-            for i in range(COMPILE_TIMES):
-                print(f"LaTeX 编译第 {i+1}/{COMPILE_TIMES} 次...")
-                subprocess.run(
-                    f'{compiler} -interaction=nonstopmode -output-directory "{tmpdir}" "{tex_file}"',
-                    capture_output=True, shell=True, check=True, timeout=60
-                )
-
-            # 转换 PDF 为 PNG
-            pdf_file = os.path.join(tmpdir, "formula.pdf")
-            if not os.path.exists(pdf_file):
-                raise FileNotFoundError(f"LaTeX 编译后未生成 PDF 文件: {pdf_file}")
-
-            # 使用 PyMuPDF 转换
-            import fitz
-            # 应用抗锯齿设置（PyMuPDF 有效范围 0-8）
-            fitz.graphics_antialias = min(ANTIALIASING, 8)
-            fitz.text_antialias = min(ANTIALIASING, 8)
-            pdf_document = fitz.open(pdf_file)
-            try:
-                page = pdf_document[0]
-                zoom = IMAGE_DPI / 72  # 72是PDF的标准DPI
-                matrix = fitz.Matrix(zoom, zoom)
-
-                # 扩展 MediaBox 确保内容不被页面裁剪
-                # standalone 生成的 PDF 中 \frac 的分母可能超出 MediaBox 范围
-                mb = page.mediabox
-                PAD = 30  # pt，足够容纳任何溢出的文本/分数线
-                page.set_mediabox(fitz.Rect(mb.x0 - PAD, mb.y0 - PAD,
-                                            mb.x1 + PAD, mb.y1 + PAD))
-
-                # 渲染页面
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                rendered = Image.open(io.BytesIO(pix.tobytes("png")))
-
-                # 用像素级扫描裁剪到实际内容边界
-                inverted = ImageOps.invert(rendered)
-                bbox = inverted.getbbox()
-                if bbox:
-                    image = rendered.crop(bbox)
-                else:
-                    image = rendered
-            finally:
-                pdf_document.close()
-
-            # 使用PIL处理图片，添加边距
-
-            # 创建带边距的新图片
-            new_width = image.width + 2 * IMAGE_PADDING
-            new_height = image.height + 2 * IMAGE_PADDING
-            new_image = Image.new("RGB", (new_width, new_height), "white")
-            new_image.paste(image, (IMAGE_PADDING, IMAGE_PADDING))
-
-            # 转换为字节
-            output = io.BytesIO()
-            new_image.save(output, format="PNG", optimize=True)
-
-            return output.getvalue()
-
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
-            raise Exception(f"LaTeX 编译失败: {error_msg}")
-        except subprocess.TimeoutExpired:
-            raise Exception("LaTeX 编译超时（超过 60 秒），请检查公式是否正确或降低 IMAGE_DPI")
-
-def safe_paste():
-    """安全地执行粘贴操作"""
-    # 确保所有按键都已释放
-    keyboard.release('ctrl')
-    keyboard.release('v')
-    time.sleep(0.1)
-
-    # 执行粘贴
-    send_hotkey(PASTE_HOTKEY, hold=0.05, after=0.05)
-
-def Start():
-    """主函数"""
-    global is_processing
-
-    # 防止重复触发
-    if is_processing:
-        print("正在处理中，请稍候...")
-        return
-
-    is_processing = True
+def process_current_input() -> bool:
+    """Render the focused input's text and replace it without deleting it first."""
+    if not processing_lock.acquire(blocking=False):
+        print("正在处理中，请稍候……")
+        return False
 
     try:
-        print("开始生成 LaTeX 公式图片...")
+        source_window = get_foreground_window()
+        text = read_current_input_text()
+        if not text or not text.strip():
+            print("输入框为空或无法读取文本。")
+            return False
 
-        # 获取输入框中的文本
-        text = get_input_text()
-        if not text or text.strip() == "":
-            print("输入框为空或无法获取文本")
-            print("请确保:")
-            print("1. 光标在输入框中")
-            print("2. 输入框中有文本内容")
-            print("3. 程序有足够的权限访问剪贴板")
-            return
-
-        print(f"获取到的文本: {text}")
+        print(f"读取到文本: {text}")
+        png_bytes = latex_to_image(text)
 
         try:
-            # 生成图片
-            png_bytes = latex_to_image(text)
-
-            # 复制到剪贴板
+            replace_current_input_with_image(source_window, text, png_bytes)
+            print("公式图片已生成并粘贴。")
+            return True
+        except InputStateChangedError as exc:
             copy_png_bytes_to_clipboard(png_bytes)
-            print("✓ 公式图片已生成并复制到剪贴板")
-
-            # 等待一小段时间确保剪贴板已更新
-            time.sleep(0.3)
-
-            # 安全地粘贴
-            safe_paste()
-            print("✓ 已粘贴公式图片")
-
-        except Exception as e:
-            print(f"生成失败: {e}")
-            # 如果失败，尝试恢复原始文本
-            try:
-                pyperclip.copy(text)
-                safe_paste()
-                print("已恢复原始文本")
-            except:
-                print("无法恢复原始文本")
+            print(f"未自动替换：{exc}")
+            print("原文本未被删除，图片已复制到剪贴板，可手动粘贴。")
+            return False
+        except Exception as exc:
+            copy_png_bytes_to_clipboard(png_bytes)
+            print(f"自动粘贴失败：{exc}")
+            print("原文本通常仍在输入框中，图片已复制到剪贴板。")
+            return False
+    except Exception as exc:
+        print(f"生成失败：{exc}")
+        print("转换前未删除原文本。")
+        return False
     finally:
-        # 重置处理状态
-        is_processing = False
+        processing_lock.release()
 
-# 绑定热键 - 使用 suppress=False 避免干扰其他按键
-keyboard.add_hotkey(HOTKEY, Start, suppress=False)
 
-print("LaTeX 公式生成器已启动")
-print(f"热键: {HOTKEY}")
-print(f"默认字体大小: {DEFAULT_FONT_SIZE}pt")
-print(f"图片分辨率: {IMAGE_DPI} DPI")
-print(f"抗锯齿级别: {ANTIALIASING}")
-print(f"中文支持: {'启用' if ENABLE_CHINESE_SUPPORT else '禁用'}")
-print("使用方法:")
-print("1. 在任意输入框中输入 LaTeX 公式")
-print("2. 确保光标在该输入框中")
-print("3. 按热键生成公式图片")
-print("4. 公式图片会自动替换输入框中的文本")
-print("=" * 50)
-print("如果遇到'输入框为空'的问题，请尝试:")
-print("1. 确保输入框中有文本")
-print("2. 以管理员身份运行此程序")
-print("3. 检查是否有其他程序占用剪贴板")
+def print_startup_help() -> None:
+    print("LaTeX 公式图片生成器已启动")
+    print(f"热键: {HOTKEY}")
+    print(f"默认字体大小: {DEFAULT_FONT_SIZE}pt")
+    print(f"图片分辨率: {IMAGE_DPI} DPI")
+    print(f"抗锯齿级别: {ANTIALIASING}")
+    print(f"中文支持: {'启用' if ENABLE_CHINESE_SUPPORT else '禁用'}")
+    print("使用方法:")
+    print("1. 在当前输入框中输入 LaTeX 公式")
+    print("2. 保持输入框焦点并按下热键")
+    print("3. 处理期间不要切换窗口或修改输入内容")
+    print("=" * 50)
 
-# 保持程序运行
-try:
-    keyboard.wait()
-except KeyboardInterrupt:
-    print("程序退出")
+
+def main() -> None:
+    keyboard.add_hotkey(HOTKEY, process_current_input, suppress=False)
+    print_startup_help()
+    try:
+        keyboard.wait()
+    except KeyboardInterrupt:
+        print("程序退出")
+    finally:
+        keyboard.unhook_all_hotkeys()
+
+
+if __name__ == "__main__":
+    main()
