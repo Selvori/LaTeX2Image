@@ -83,3 +83,7 @@ E = mc^2 \quad \text{质能方程}
 ## 配置
 
 可自行修改 `latex_config.py`。
+
+## 许可证
+
+本项目采用 [MIT License](https://opensource.org/license/mit/) 开源。
